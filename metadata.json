@@ -1,0 +1,6 @@
+{
+  "name": "Termux Suite",
+  "description": "Your pocket terminal emulator packed with customizable productivity tools, local shell scripts, Pomodoro tracking, and system utilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
