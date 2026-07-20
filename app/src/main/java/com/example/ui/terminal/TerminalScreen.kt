@@ -478,6 +478,9 @@ fun TerminalConsole(
             }
         }
 
+        // Clipboard History Row
+        TerminalClipboardHistory(viewModel = viewModel, colors = colors)
+
         // Prompt Input Row
         Row(
             modifier = Modifier
@@ -1177,6 +1180,7 @@ fun SnippetsTab(
                                             val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                             val clip = android.content.ClipData.newPlainText("snippet_cmd", snippet.command)
                                             clipboard.setPrimaryClip(clip)
+                                            viewModel.addCopiedCommand(snippet.command)
                                         },
                                         modifier = Modifier.size(26.dp)
                                     ) {
@@ -1638,6 +1642,7 @@ fun ScriptsTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
                                                 val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                                 val clip = android.content.ClipData.newPlainText("termux_script", script.content)
                                                 clipboard.setPrimaryClip(clip)
+                                                viewModel.addCopiedCommand(script.content)
                                                 viewModel.executeCommand("echo \"Copied script '${script.name}.sh' to clipboard.\"")
                                             },
                                             modifier = Modifier.size(24.dp)
@@ -1654,7 +1659,6 @@ fun ScriptsTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
                                             .background(Color(0xFF151418), RoundedCornerShape(6.dp))
                                             .border(BorderStroke(1.dp, colors.text.copy(alpha = 0.1f)), RoundedCornerShape(6.dp))
                                             .padding(8.dp)
-                                            .verticalScroll(rememberScrollState())
                                     ) {
                                         CodeHighlightText(text = script.content, colors = colors)
                                     }
@@ -1665,6 +1669,8 @@ fun ScriptsTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
                 }
             }
         }
+
+        ScriptConsole(viewModel = viewModel, colors = colors)
     }
 
     // Modern Dialog Composer for adding/editing scripts
@@ -1798,6 +1804,214 @@ fun ScriptsTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
                 }
             }
         )
+    }
+}
+
+@Composable
+fun ScriptConsole(viewModel: TerminalViewModel, colors: ConsoleColors) {
+    val output by viewModel.scriptConsoleOutput.collectAsStateWithLifecycle(initialValue = emptyList())
+    val isScriptExecuting by viewModel.isScriptExecuting.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+
+    var isConsoleExpanded by remember { mutableStateOf(true) }
+
+    // Auto-expand the console when a script starts executing
+    LaunchedEffect(isScriptExecuting) {
+        if (isScriptExecuting) {
+            isConsoleExpanded = true
+        }
+    }
+
+    val listState = rememberLazyListState()
+
+    // Auto-scroll when new log lines are appended
+    LaunchedEffect(output.size) {
+        if (output.isNotEmpty()) {
+            listState.animateScrollToItem(output.size - 1)
+        }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
+        border = BorderStroke(1.dp, colors.primary.copy(alpha = if (isScriptExecuting) 0.4f else 0.15f)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .testTag("script_console_card")
+    ) {
+        Column {
+            // Header Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isConsoleExpanded = !isConsoleExpanded }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Code,
+                        contentDescription = "Script Console Icon",
+                        tint = colors.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "SCRIPT EXECUTION CONSOLE",
+                        color = colors.primary,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+
+                    // Pulse status indicator
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier
+                            .background(
+                                if (isScriptExecuting) colors.success.copy(alpha = 0.12f) else colors.text.copy(alpha = 0.05f),
+                                RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(
+                                    if (isScriptExecuting) colors.success else colors.text.copy(alpha = 0.4f),
+                                    shape = androidx.compose.foundation.shape.CircleShape
+                                )
+                        )
+                        Text(
+                            text = if (isScriptExecuting) "EXECUTING" else "IDLE",
+                            color = if (isScriptExecuting) colors.success else colors.text.copy(alpha = 0.5f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (output.isNotEmpty()) {
+                        // Copy logs button
+                        IconButton(
+                            onClick = {
+                                val textToCopy = output.joinToString("\n") { it.text }
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                val clip = android.content.ClipData.newPlainText("script_console_output", textToCopy)
+                                clipboard.setPrimaryClip(clip)
+                                viewModel.appendLine("Copied script output logs to clipboard.", LineType.SUCCESS)
+                            },
+                            modifier = Modifier.size(24.dp).testTag("script_console_copy_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "Copy Console Output",
+                                tint = colors.text.copy(alpha = 0.6f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+
+                        // Clear logs button
+                        IconButton(
+                            onClick = { viewModel.clearScriptConsoleOutput() },
+                            modifier = Modifier.size(24.dp).testTag("script_console_clear_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Clear Console Output",
+                                tint = colors.error.copy(alpha = 0.8f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
+
+                    Icon(
+                        imageVector = if (isConsoleExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Expand/Collapse Console",
+                        tint = colors.primary.copy(alpha = 0.7f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = isConsoleExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF09080A))
+                        .border(BorderStroke(1.dp, colors.primary.copy(alpha = 0.08f)))
+                        .padding(8.dp)
+                ) {
+                    if (output.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(140.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "$ _",
+                                    color = colors.primary.copy(alpha = 0.5f),
+                                    fontFamily = colors.fontFamily,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Ready. Execute a script or template to stream real-time output.",
+                                    color = colors.text.copy(alpha = 0.35f),
+                                    fontFamily = colors.fontFamily,
+                                    fontSize = 10.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 24.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(140.dp)
+                                .testTag("script_console_output_list"),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            items(output) { line ->
+                                val color = when (line.type) {
+                                    LineType.INPUT -> colors.primary
+                                    LineType.OUTPUT -> colors.text
+                                    LineType.ERROR -> colors.error
+                                    LineType.SUCCESS -> colors.success
+                                    LineType.INFO -> colors.info
+                                    LineType.HEADER -> colors.primary
+                                    LineType.WARNING -> colors.warning
+                                }
+                                Text(
+                                    text = line.text,
+                                    color = color,
+                                    fontFamily = colors.fontFamily,
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2362,109 +2576,11 @@ fun StatusTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
             }
         }
 
-        // Pomodoro Manager Box
-        Card(
-            colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Pomodoro Timer Controller",
-                        color = colors.primary,
-                        fontFamily = colors.fontFamily,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
-                    Badge(
-                        containerColor = if (pomoSession.isRunning) colors.error else colors.text.copy(alpha = 0.2f),
-                        contentColor = if (pomoSession.isRunning) Color.White else colors.text
-                    ) {
-                        Text(
-                            text = if (pomoSession.isRunning) "ACTIVE" else "IDLE",
-                            fontFamily = colors.fontFamily,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                        )
-                    }
-                }
+        // Real-time Network Traffic Monitor Component
+        TerminalNetworkMonitor(metrics = metrics, colors = colors)
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                if (pomoSession.isRunning) {
-                    val minutes = pomoSession.secondsRemaining / 60
-                    val seconds = pomoSession.secondsRemaining % 60
-                    val progress = 1f - (pomoSession.secondsRemaining.toFloat() / pomoSession.totalSeconds)
-
-                    Text(
-                        text = "Session: %02d:%02d".format(minutes, seconds),
-                        color = colors.text,
-                        fontFamily = colors.fontFamily,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.fillMaxWidth().height(6.dp),
-                        color = colors.error,
-                        trackColor = colors.background
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Button(
-                        onClick = { viewModel.stopPomodoro() },
-                        colors = ButtonDefaults.buttonColors(containerColor = colors.error),
-                        shape = RoundedCornerShape(4.dp),
-                        modifier = Modifier.align(Alignment.End)
-                    ) {
-                        Text("Stop Timer", color = Color.White, fontFamily = colors.fontFamily, fontSize = 11.sp)
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = pomoMinutesInput,
-                            onValueChange = { pomoMinutesInput = it },
-                            textStyle = TextStyle(color = colors.text, fontFamily = colors.fontFamily, fontSize = 12.sp),
-                            label = { Text("Duration (mins)", color = colors.text.copy(alpha = 0.5f), fontFamily = colors.fontFamily, fontSize = 10.sp) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = colors.primary,
-                                unfocusedBorderColor = colors.primary.copy(alpha = 0.4f),
-                                cursorColor = colors.primary
-                            ),
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.weight(1f).height(50.dp),
-                            singleLine = true
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Button(
-                            onClick = {
-                                val mins = pomoMinutesInput.toIntOrNull() ?: 25
-                                viewModel.startPomodoro(mins)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.height(48.dp)
-                        ) {
-                            Text("Start Focus", color = colors.background, fontFamily = colors.fontFamily, fontSize = 11.sp)
-                        }
-                    }
-                    Text(
-                        text = "Completed Sessions: ${pomoSession.completedCount}",
-                        color = colors.text.copy(alpha = 0.6f),
-                        fontFamily = colors.fontFamily,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-            }
-        }
+        // Pomodoro Manager Component
+        TerminalPomodoroTimer(viewModel = viewModel, colors = colors)
 
         // Quick Command Run Box
         Card(
@@ -2513,6 +2629,231 @@ fun StatusTab(viewModel: TerminalViewModel, colors: ConsoleColors) {
                     ) {
                         Text("MATRIX", color = colors.success, fontFamily = colors.fontFamily, fontSize = 10.sp)
                     }
+                }
+            }
+        }
+
+        // Package & System Updates Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
+            border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.2f)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().testTag("system_updates_card")
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "System Updates",
+                        tint = colors.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "PACKAGE & SYSTEM UPDATE v2.1",
+                        color = colors.primary,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Synchronize package repository indexes and sequentially upgrade all installed apt packages to their newest virtual builds.",
+                    color = colors.text.copy(alpha = 0.8f),
+                    fontFamily = colors.fontFamily,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${viewModel.installedPackages.size} packages installed",
+                        color = colors.success,
+                        fontFamily = colors.fontFamily,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Button(
+                        onClick = { viewModel.executeCommand("apt-upgrade-all") },
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("batch_update_all_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Update All",
+                            tint = colors.background,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "BATCH UPDATE ALL",
+                            color = colors.background,
+                            fontFamily = colors.fontFamily,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        // Configuration Backup Utility Card
+        val lastBackupTime by viewModel.lastBackupTime.collectAsStateWithLifecycle()
+        val lastBackupSize by viewModel.lastBackupSize.collectAsStateWithLifecycle()
+        val lastBackupFile by viewModel.lastBackupFile.collectAsStateWithLifecycle()
+        val context = androidx.compose.ui.platform.LocalContext.current
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
+            border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.2f)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().testTag("config_backup_card")
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Backup,
+                        contentDescription = "Configuration Backup",
+                        tint = colors.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "CONFIG BACKUP UTILITY v1.2",
+                        color = colors.primary,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Generate a compressed ZIP archive of all command snippets and custom shell scripts to secure your configurations locally.",
+                    color = colors.text.copy(alpha = 0.8f),
+                    fontFamily = colors.fontFamily,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                
+                if (lastBackupTime > 0L && lastBackupFile != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(colors.background, RoundedCornerShape(8.dp))
+                            .border(1.dp, colors.primary.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            text = "LATEST BACKUP INFO:",
+                            color = colors.success,
+                            fontFamily = colors.fontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "File: termux_config_backup.zip",
+                            color = colors.text,
+                            fontFamily = colors.fontFamily,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = "Size: %.2f KB".format(lastBackupSize / 1024.0),
+                            color = colors.text.copy(alpha = 0.7f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 11.sp
+                        )
+                        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                        Text(
+                            text = "Created: ${sdf.format(Date(lastBackupTime))}",
+                            color = colors.text.copy(alpha = 0.7f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 11.sp
+                        )
+                        
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    val file = java.io.File(lastBackupFile!!)
+                                    if (file.exists()) {
+                                        try {
+                                            val authority = "${context.packageName}.provider"
+                                            val uri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+                                            
+                                            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                type = "application/zip"
+                                                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                                putExtra(android.content.Intent.EXTRA_SUBJECT, "Pocket Terminal Config Backup")
+                                                putExtra(android.content.Intent.EXTRA_TEXT, "Here is my Pocket Terminal snippets & scripts backup.")
+                                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            
+                                            context.startActivity(android.content.Intent.createChooser(intent, "Save Config Backup To...").apply {
+                                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            })
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = colors.primary.copy(alpha = 0.2f), contentColor = colors.primary),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(30.dp).testTag("share_backup_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Share, contentDescription = "Share", modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("SHARE / SAVE", fontFamily = colors.fontFamily, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Button(
+                    onClick = { viewModel.triggerLocalBackup() },
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(36.dp)
+                        .testTag("trigger_backup_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Backup,
+                        contentDescription = "Backup Now",
+                        tint = colors.background,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "GENERATE BACKUP ZIP",
+                        color = colors.background,
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
@@ -2694,5 +3035,989 @@ fun MatrixRain(
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp)
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TerminalPomodoroTimer(
+    viewModel: TerminalViewModel,
+    colors: ConsoleColors
+) {
+    val pomoSession by viewModel.pomoSession.collectAsStateWithLifecycle()
+    val tasks by viewModel.allTasks.collectAsStateWithLifecycle(initialValue = emptyList())
+    
+    var showTaskSelector by remember { mutableStateOf(false) }
+    var pomoMinutesInput by remember { mutableStateOf("25") }
+    
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
+        border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.3f)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("pomodoro_timer_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Timer,
+                        contentDescription = "Pomodoro Timer",
+                        tint = if (pomoSession.isRunning) colors.error else colors.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "POMODORO SYSTEM v2.0",
+                        color = colors.primary,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+                
+                Badge(
+                    containerColor = when {
+                        pomoSession.isRunning -> colors.error.copy(alpha = 0.2f)
+                        pomoSession.isPaused -> colors.warning.copy(alpha = 0.2f)
+                        else -> colors.text.copy(alpha = 0.1f)
+                    },
+                    contentColor = when {
+                        pomoSession.isRunning -> colors.error
+                        pomoSession.isPaused -> colors.warning
+                        else -> colors.text.copy(alpha = 0.6f)
+                    },
+                    modifier = Modifier.border(
+                        1.dp,
+                        when {
+                            pomoSession.isRunning -> colors.error.copy(alpha = 0.5f)
+                            pomoSession.isPaused -> colors.warning.copy(alpha = 0.5f)
+                            else -> colors.text.copy(alpha = 0.2f)
+                        },
+                        RoundedCornerShape(4.dp)
+                    )
+                ) {
+                    Text(
+                        text = when {
+                            pomoSession.isRunning -> "RUNNING"
+                            pomoSession.isPaused -> "PAUSED"
+                            else -> "IDLE"
+                        },
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Quick presets
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PresetButton(
+                    label = "25m Focus",
+                    active = pomoSession.sessionType == "Work",
+                    colors = colors,
+                    onClick = {
+                        viewModel.startPomodoro(25, "Work")
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                PresetButton(
+                    label = "5m Short Break",
+                    active = pomoSession.sessionType == "Short Break" && !pomoSession.isWork,
+                    colors = colors,
+                    onClick = {
+                        viewModel.startPomodoro(5, "Short Break")
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                PresetButton(
+                    label = "15m Long Break",
+                    active = pomoSession.sessionType == "Long Break",
+                    colors = colors,
+                    onClick = {
+                        viewModel.startPomodoro(15, "Long Break")
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Main Display: Circular Progress with Digital Clock
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(140.dp)
+                        .padding(8.dp)
+                ) {
+                    val progress = if (pomoSession.totalSeconds > 0) {
+                        (pomoSession.totalSeconds - pomoSession.secondsRemaining).toFloat() / pomoSession.totalSeconds
+                    } else {
+                        0f
+                    }
+                    
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxSize(),
+                        color = if (pomoSession.isWork) colors.error else colors.success,
+                        strokeWidth = 8.dp,
+                        trackColor = colors.background
+                    )
+                    
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        val mins = pomoSession.secondsRemaining / 60
+                        val secs = pomoSession.secondsRemaining % 60
+                        val timeStr = "%02d:%02d".format(mins, secs)
+                        
+                        Text(
+                            text = timeStr,
+                            color = colors.text,
+                            fontFamily = colors.fontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 26.sp,
+                            letterSpacing = 1.sp
+                        )
+                        
+                        Spacer(modifier = Modifier.height(2.dp))
+                        
+                        Text(
+                            text = pomoSession.sessionType.uppercase(),
+                            color = (if (pomoSession.isWork) colors.error else colors.success).copy(alpha = 0.8f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp
+                        )
+                    }
+                }
+            }
+            
+            // Visual ASCII progress indicator
+            val completedBlocks = if (pomoSession.totalSeconds > 0) {
+                ((pomoSession.totalSeconds - pomoSession.secondsRemaining) * 15) / pomoSession.totalSeconds
+            } else 0
+            val barStr = "█".repeat(completedBlocks) + "░".repeat(15 - completedBlocks)
+            val pct = if (pomoSession.totalSeconds > 0) {
+                ((pomoSession.totalSeconds - pomoSession.secondsRemaining) * 100) / pomoSession.totalSeconds
+            } else 0
+            
+            Text(
+                text = "Progress: [%s] %d%%".format(barStr, pct),
+                color = colors.text.copy(alpha = 0.6f),
+                fontFamily = colors.fontFamily,
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
+
+            // Linked Task Selector Section
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.background.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .border(1.dp, colors.primary.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "LINKED FOCUS TASK",
+                        color = colors.primary.copy(alpha = 0.8f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Text(
+                        text = if (showTaskSelector) "Close" else "Link Task",
+                        color = colors.info,
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { showTaskSelector = !showTaskSelector }
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(6.dp))
+                
+                val activeTask = pomoSession.activeTask
+                if (activeTask != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlaylistAddCheck,
+                                contentDescription = "Active Task",
+                                tint = colors.success,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = activeTask,
+                                color = colors.text,
+                                fontFamily = colors.fontFamily,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        
+                        IconButton(
+                            onClick = { viewModel.selectPomoTask(null) },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Clear Task Link",
+                                tint = colors.error,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "No task linked. Staying focused on generic goals.",
+                        color = colors.text.copy(alpha = 0.5f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 11.sp
+                    )
+                }
+                
+                // Expandable Task List Selector
+                if (showTaskSelector) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = colors.primary.copy(alpha = 0.15f))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    val activeTasks = tasks.filter { !it.isCompleted }
+                    if (activeTasks.isEmpty()) {
+                        Text(
+                            text = "No active tasks in backlog. Create a task in the Tasks tab first!",
+                            color = colors.warning,
+                            fontFamily = colors.fontFamily,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "Select task to link:",
+                            color = colors.text.copy(alpha = 0.6f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            activeTasks.forEach { t ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            if (t.task == activeTask) colors.primary.copy(alpha = 0.1f) else Color.Transparent,
+                                            RoundedCornerShape(4.dp)
+                                        )
+                                        .clickable {
+                                            viewModel.selectPomoTask(t.task)
+                                            showTaskSelector = false
+                                        }
+                                        .padding(vertical = 6.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "•",
+                                        color = colors.primary,
+                                        fontFamily = colors.fontFamily,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = t.task,
+                                        color = if (t.task == activeTask) colors.primary else colors.text,
+                                        fontFamily = colors.fontFamily,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Interactive Controls Dock
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Play / Pause / Resume Button
+                ControlButton(
+                    icon = if (pomoSession.isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    label = if (pomoSession.isRunning) "Pause" else if (pomoSession.isPaused) "Resume" else "Start",
+                    color = if (pomoSession.isRunning) colors.warning else colors.primary,
+                    colors = colors,
+                    onClick = {
+                        if (pomoSession.isRunning) {
+                            viewModel.pausePomodoro()
+                        } else if (pomoSession.isPaused) {
+                            viewModel.resumePomodoro()
+                        } else {
+                            val mins = pomoMinutesInput.toIntOrNull() ?: 25
+                            viewModel.startPomodoro(mins, "Work")
+                        }
+                    }
+                )
+                
+                // Reset Button
+                ControlButton(
+                    icon = Icons.Default.Refresh,
+                    label = "Reset",
+                    color = colors.info,
+                    colors = colors,
+                    onClick = {
+                        viewModel.resetPomodoro()
+                    }
+                )
+                
+                // Skip Button (Toggle between Work & Break)
+                ControlButton(
+                    icon = Icons.Default.SkipNext,
+                    label = "Skip",
+                    color = colors.success,
+                    colors = colors,
+                    onClick = {
+                        val nextType = if (pomoSession.sessionType == "Work") "Short Break" else "Work"
+                        val nextMins = if (nextType == "Work") 25 else 5
+                        viewModel.startPomodoro(nextMins, nextType)
+                    }
+                )
+                
+                // Stop/Abort Button
+                ControlButton(
+                    icon = Icons.Default.Cancel,
+                    label = "Stop",
+                    color = colors.error,
+                    colors = colors,
+                    onClick = {
+                        viewModel.stopPomodoro()
+                    }
+                )
+            }
+
+            // Customizable Custom Duration textfield when not running
+            if (!pomoSession.isRunning && !pomoSession.isPaused) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = pomoMinutesInput,
+                        onValueChange = { pomoMinutesInput = it },
+                        textStyle = TextStyle(color = colors.text, fontFamily = colors.fontFamily, fontSize = 12.sp),
+                        label = { Text("Custom Work Duration (mins)", color = colors.primary, fontFamily = colors.fontFamily, fontSize = 10.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = colors.primary,
+                            unfocusedBorderColor = colors.primary.copy(alpha = 0.4f),
+                            cursorColor = colors.primary
+                        ),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        singleLine = true
+                    )
+                }
+            }
+            
+            // Total stats
+            Text(
+                text = "SESSION COUNTER: %d COMPLETED BLOCKS".format(pomoSession.completedCount),
+                color = colors.success,
+                fontFamily = colors.fontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
+        }
+    }
+}
+
+@Composable
+fun PresetButton(
+    label: String,
+    active: Boolean,
+    colors: ConsoleColors,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .background(
+                if (active) colors.primary.copy(alpha = 0.15f) else colors.background,
+                RoundedCornerShape(6.dp)
+            )
+            .border(
+                1.dp,
+                if (active) colors.primary else colors.primary.copy(alpha = 0.3f),
+                RoundedCornerShape(6.dp)
+            )
+            .clickable { onClick() }
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (active) colors.primary else colors.text.copy(alpha = 0.8f),
+            fontFamily = colors.fontFamily,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun ControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    color: Color,
+    colors: ConsoleColors,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() }
+            .padding(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(color.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape)
+                .border(1.dp, color.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = color,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Text(
+            text = label.uppercase(),
+            color = colors.text.copy(alpha = 0.7f),
+            fontFamily = colors.fontFamily,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun TerminalNetworkMonitor(
+    metrics: DeviceMetrics,
+    colors: ConsoleColors
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colors.cardBackground),
+        border = BorderStroke(1.dp, colors.primary.copy(alpha = 0.3f)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("network_traffic_monitor_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Wifi,
+                        contentDescription = "Network Status",
+                        tint = colors.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "REAL-TIME NETWORK MON v1.0",
+                        color = colors.primary,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .background(colors.success.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .border(1.dp, colors.success.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .background(colors.success, androidx.compose.foundation.shape.CircleShape)
+                    )
+                    Text(
+                        text = "ONLINE",
+                        color = colors.success,
+                        fontFamily = colors.fontFamily,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Speeds Grid
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Download Speed Block
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(colors.background.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .border(1.dp, colors.primary.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDownward,
+                            contentDescription = "Download",
+                            tint = colors.success,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "DOWNLOAD",
+                            color = colors.text.copy(alpha = 0.5f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = formatNetworkSpeed(metrics.downloadSpeedKbps),
+                        color = colors.success,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Total Rx: ${formatBytes(metrics.totalRxBytes)}",
+                        color = colors.text.copy(alpha = 0.5f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp
+                    )
+                }
+
+                // Upload Speed Block
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(colors.background.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .border(1.dp, colors.primary.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowUpward,
+                            contentDescription = "Upload",
+                            tint = colors.info,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "UPLOAD",
+                            color = colors.text.copy(alpha = 0.5f),
+                            fontFamily = colors.fontFamily,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = formatNetworkSpeed(metrics.uploadSpeedKbps),
+                        color = colors.info,
+                        fontFamily = colors.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Total Tx: ${formatBytes(metrics.totalTxBytes)}",
+                        color = colors.text.copy(alpha = 0.5f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+
+            // Real-time Traffic Graph (Canvas)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.background, RoundedCornerShape(8.dp))
+                    .border(1.dp, colors.primary.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "REAL-TIME BANDWIDTH MONITOR",
+                        color = colors.primary.copy(alpha = 0.8f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    val maxInHistory = metrics.networkHistory.maxOfOrNull { maxOf(it.first, it.second) } ?: 10.0
+                    val scaleStr = if (maxInHistory < 1024.0) {
+                        "Scale: %.0f KB/s".format(maxOf(maxInHistory, 1.0))
+                    } else {
+                        "Scale: %.1f MB/s".format(maxOf(maxInHistory, 1024.0) / 1024.0)
+                    }
+                    Text(
+                        text = scaleStr,
+                        color = colors.text.copy(alpha = 0.4f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 9.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(80.dp)
+                ) {
+                    val history = metrics.networkHistory
+                    val successColor = colors.success
+                    val infoColor = colors.info
+                    val gridColor = colors.primary.copy(alpha = 0.05f)
+
+                    androidx.compose.foundation.Canvas(
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        val width = size.width
+                        val height = size.height
+                        
+                        // Draw horizontal grid lines
+                        val gridLines = 4
+                        for (i in 0..gridLines) {
+                            val y = (height / gridLines) * i
+                            drawLine(
+                                color = gridColor,
+                                start = androidx.compose.ui.geometry.Offset(0f, y),
+                                end = androidx.compose.ui.geometry.Offset(width, y),
+                                strokeWidth = 1f
+                            )
+                        }
+
+                        // Draw vertical grid lines
+                        val vertLines = 10
+                        for (i in 0..vertLines) {
+                            val x = (width / vertLines) * i
+                            drawLine(
+                                color = gridColor,
+                                start = androidx.compose.ui.geometry.Offset(x, 0f),
+                                end = androidx.compose.ui.geometry.Offset(x, height),
+                                strokeWidth = 1f
+                            )
+                        }
+
+                        if (history.size > 1) {
+                            val maxVal = maxOf(history.maxOf { maxOf(it.first, it.second) }, 1.0)
+                            val stepX = width / (history.size - 1)
+
+                            // 1. Draw Download Path (Success/Green)
+                            val downPath = androidx.compose.ui.graphics.Path().apply {
+                                val firstVal = history[0].first
+                                val startY = height - (firstVal.toFloat() / maxVal.toFloat()) * height
+                                moveTo(0f, startY)
+                                for (index in 1 until history.size) {
+                                    val valAtIdx = history[index].first
+                                    val x = index * stepX
+                                    val y = height - (valAtIdx.toFloat() / maxVal.toFloat()) * height
+                                    lineTo(x, y)
+                                }
+                            }
+
+                            // Fill area under download path
+                            val downFillPath = androidx.compose.ui.graphics.Path().apply {
+                                addPath(downPath)
+                                lineTo(width, height)
+                                lineTo(0f, height)
+                                close()
+                            }
+                            drawPath(
+                                path = downFillPath,
+                                brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(successColor.copy(alpha = 0.15f), successColor.copy(alpha = 0.0f))
+                                )
+                            )
+
+                            drawPath(
+                                path = downPath,
+                                color = successColor,
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                            )
+
+                            // 2. Draw Upload Path (Info/Blue)
+                            val upPath = androidx.compose.ui.graphics.Path().apply {
+                                val firstVal = history[0].second
+                                val startY = height - (firstVal.toFloat() / maxVal.toFloat()) * height
+                                moveTo(0f, startY)
+                                for (index in 1 until history.size) {
+                                    val valAtIdx = history[index].second
+                                    val x = index * stepX
+                                    val y = height - (valAtIdx.toFloat() / maxVal.toFloat()) * height
+                                    lineTo(x, y)
+                                }
+                            }
+
+                            // Fill area under upload path
+                            val upFillPath = androidx.compose.ui.graphics.Path().apply {
+                                addPath(upPath)
+                                lineTo(width, height)
+                                lineTo(0f, height)
+                                close()
+                            }
+                            drawPath(
+                                path = upFillPath,
+                                brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(infoColor.copy(alpha = 0.15f), infoColor.copy(alpha = 0.0f))
+                                )
+                            )
+
+                            drawPath(
+                                path = upPath,
+                                color = infoColor,
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.5f)
+                            )
+                        }
+                    }
+                }
+                
+                // Visual Legend
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(colors.success, RoundedCornerShape(2.dp))
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "RX (Down)",
+                        color = colors.text.copy(alpha = 0.6f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(colors.info, RoundedCornerShape(2.dp))
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "TX (Up)",
+                        color = colors.text.copy(alpha = 0.6f),
+                        fontFamily = colors.fontFamily,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+// Helpers
+private fun formatNetworkSpeed(speedKbps: Double): String {
+    return if (speedKbps < 1024.0) {
+        "%.1f KB/s".format(speedKbps)
+    } else {
+        "%.2f MB/s".format(speedKbps / 1024.0)
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> "%.2f GB".format(gb)
+        mb >= 1.0 -> "%.1f MB".format(mb)
+        else -> "%.0f KB".format(kb)
+    }
+}
+
+@Composable
+fun TerminalClipboardHistory(
+    viewModel: TerminalViewModel,
+    colors: ConsoleColors
+) {
+    val history by viewModel.clipboardHistory.collectAsStateWithLifecycle()
+    if (history.isEmpty()) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.cardBackground.copy(alpha = 0.5f))
+            .border(1.dp, colors.primary.copy(alpha = 0.1f))
+            .padding(vertical = 4.dp)
+            .testTag("clipboard_history_manager_container")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentPaste,
+                    contentDescription = "Clipboard History",
+                    tint = colors.primary.copy(alpha = 0.7f),
+                    modifier = Modifier.size(13.dp)
+                )
+                Text(
+                    text = "CLIPBOARD HISTORY",
+                    color = colors.primary.copy(alpha = 0.7f),
+                    fontFamily = colors.fontFamily,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+            }
+            
+            Text(
+                text = "CLEAR ALL",
+                color = colors.error.copy(alpha = 0.7f),
+                fontFamily = colors.fontFamily,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .clickable { viewModel.clearClipboardHistory() }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                    .testTag("clear_clipboard_history_btn")
+            )
+        }
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        androidx.compose.foundation.lazy.LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items(history) { command ->
+                Row(
+                    modifier = Modifier
+                        .background(colors.background, RoundedCornerShape(6.dp))
+                        .border(1.dp, colors.primary.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                        .clickable { viewModel.onInputChange(command) }
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                        .testTag("clipboard_history_item"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = command,
+                        color = colors.text,
+                        fontFamily = colors.fontFamily,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 140.dp)
+                    )
+                    
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Execute Command",
+                        tint = colors.success,
+                        modifier = Modifier
+                            .size(13.dp)
+                            .clickable {
+                                viewModel.onInputChange(command)
+                                viewModel.executeCommandBuffer()
+                            }
+                            .testTag("clipboard_history_execute_btn")
+                    )
+                }
+            }
+        }
     }
 }

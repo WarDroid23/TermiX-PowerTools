@@ -1,6 +1,9 @@
 package com.example.ui.terminal
 
 import android.app.Application
+import android.content.ClipboardManager
+import android.content.ClipData
+import android.net.TrafficStats
 import android.os.BatteryManager
 import android.content.Context
 import android.os.SystemClock
@@ -22,6 +25,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -61,21 +67,205 @@ data class DeviceMetrics(
     val appStorageFreeGb: Double = 10.0,
     val appStorageTotalGb: Double = 64.0,
     val systemUptime: String = "0h 0m",
-    val efficiencyScore: Int = 90
+    val efficiencyScore: Int = 90,
+    val downloadSpeedKbps: Double = 0.0,
+    val uploadSpeedKbps: Double = 0.0,
+    val totalRxBytes: Long = 0L,
+    val totalTxBytes: Long = 0L,
+    val networkHistory: List<Pair<Double, Double>> = emptyList()
 )
 
 data class PomodoroSession(
     val totalSeconds: Int,
     val secondsRemaining: Int,
     val isRunning: Boolean,
+    val isPaused: Boolean = false,
     val isWork: Boolean = true,
-    val completedCount: Int = 0
+    val completedCount: Int = 0,
+    val activeTask: String? = null,
+    val sessionType: String = "Work"
 )
 
 class TerminalViewModel(
     private val application: Application,
     private val repository: TerminalRepository
 ) : AndroidViewModel(application) {
+
+    // Clipboard History Management
+    private val prefs = application.getSharedPreferences("termux_clipboard_prefs", Context.MODE_PRIVATE)
+    private val _clipboardHistory = MutableStateFlow<List<String>>(emptyList())
+    val clipboardHistory: StateFlow<List<String>> = _clipboardHistory.asStateFlow()
+
+    private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
+        try {
+            val clipboard = application.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            if (clipboard.hasPrimaryClip()) {
+                val clipData = clipboard.primaryClip
+                if (clipData != null && clipData.itemCount > 0) {
+                    val text = clipData.getItemAt(0).text?.toString()
+                    if (!text.isNullOrBlank()) {
+                        addCopiedCommand(text.trim())
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Safe fallback
+        }
+    }
+
+    fun addCopiedCommand(command: String) {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return
+        val current = _clipboardHistory.value.toMutableList()
+        current.remove(trimmed) // Move to front if exists
+        current.add(0, trimmed)
+        if (current.size > 15) {
+            current.removeAt(current.size - 1)
+        }
+        _clipboardHistory.value = current
+        saveClipboardHistory(current)
+    }
+
+    fun clearClipboardHistory() {
+        _clipboardHistory.value = emptyList()
+        saveClipboardHistory(emptyList())
+    }
+
+    private fun saveClipboardHistory(list: List<String>) {
+        try {
+            prefs.edit().putString("clipboard_history_v1", list.joinToString("\u001f")).apply()
+        } catch (e: Exception) {}
+    }
+
+    private fun loadClipboardHistory() {
+        try {
+            val raw = prefs.getString("clipboard_history_v1", null)
+            if (raw != null) {
+                _clipboardHistory.value = raw.split("\u001f").filter { it.isNotEmpty() }
+            }
+        } catch (e: Exception) {}
+    }
+
+    // Backup State Tracking
+    private val _lastBackupTime = MutableStateFlow<Long>(0L)
+    val lastBackupTime: StateFlow<Long> = _lastBackupTime.asStateFlow()
+
+    private val _lastBackupSize = MutableStateFlow<Long>(0L)
+    val lastBackupSize: StateFlow<Long> = _lastBackupSize.asStateFlow()
+
+    private val _lastBackupFile = MutableStateFlow<String?>(null)
+    val lastBackupFile: StateFlow<String?> = _lastBackupFile.asStateFlow()
+
+    private fun saveBackupMetadata(time: Long, size: Long, filePath: String) {
+        _lastBackupTime.value = time
+        _lastBackupSize.value = size
+        _lastBackupFile.value = filePath
+        try {
+            prefs.edit().apply {
+                putLong("backup_time", time)
+                putLong("backup_size", size)
+                putString("backup_file", filePath)
+                apply()
+            }
+        } catch (e: Exception) {}
+    }
+
+    private fun loadBackupMetadata() {
+        try {
+            _lastBackupTime.value = prefs.getLong("backup_time", 0L)
+            _lastBackupSize.value = prefs.getLong("backup_size", 0L)
+            _lastBackupFile.value = prefs.getString("backup_file", null)
+        } catch (e: Exception) {}
+    }
+
+    fun triggerLocalBackup() {
+        viewModelScope.launch {
+            handleBackupCommand()
+        }
+    }
+
+    private fun serializeSnippets(snippets: List<CommandSnippet>): String {
+        val items = snippets.joinToString(",\n") { snippet ->
+            """
+            {
+              "title": ${escapeJson(snippet.title)},
+              "description": ${escapeJson(snippet.description)},
+              "command": ${escapeJson(snippet.command)},
+              "category": ${escapeJson(snippet.category)},
+              "timestamp": ${snippet.timestamp}
+            }
+            """.trimIndent()
+        }
+        return "[\n$items\n]"
+    }
+
+    private fun serializeScripts(scripts: List<CustomScript>): String {
+        val items = scripts.joinToString(",\n") { script ->
+            """
+            {
+              "name": ${escapeJson(script.name)},
+              "content": ${escapeJson(script.content)},
+              "timestamp": ${script.timestamp}
+            }
+            """.trimIndent()
+        }
+        return "[\n$items\n]"
+    }
+
+    private fun escapeJson(str: String): String {
+        val escaped = str.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        return "\"$escaped\""
+    }
+
+    fun createBackupZip(context: Context, snippetsJson: String, scriptsJson: String): File? {
+        try {
+            val backupDir = File(context.filesDir, "backups")
+            if (!backupDir.exists()) {
+                backupDir.mkdirs()
+            }
+            val zipFile = File(backupDir, "termux_config_backup.zip")
+            if (zipFile.exists()) {
+                zipFile.delete()
+            }
+            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                // Add snippets.json
+                val snippetsEntry = ZipEntry("snippets.json")
+                zos.putNextEntry(snippetsEntry)
+                zos.write(snippetsJson.toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+
+                // Add scripts.json
+                val scriptsEntry = ZipEntry("scripts.json")
+                zos.putNextEntry(scriptsEntry)
+                zos.write(scriptsJson.toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+            }
+            // Save metadata
+            saveBackupMetadata(System.currentTimeMillis(), zipFile.length(), zipFile.absolutePath)
+            return zipFile
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            val clipboard = application.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.removePrimaryClipChangedListener(clipboardListener)
+        } catch (e: Exception) {}
+    }
+
+    // Network Telemetry Tracking
+    private var lastRxBytes: Long = -1L
+    private var lastTxBytes: Long = -1L
+    private var lastNetUpdateTime: Long = -1L
+    private val netSpeedHistory = Collections.synchronizedList(mutableListOf<Pair<Double, Double>>())
 
     // Terminal History and Outputs
     private val _terminalOutput = MutableStateFlow<List<TerminalLine>>(emptyList())
@@ -95,6 +285,14 @@ class TerminalViewModel(
     // Script execution state
     private val _isScriptExecuting = MutableStateFlow(false)
     val isScriptExecuting: StateFlow<Boolean> = _isScriptExecuting.asStateFlow()
+
+    // Script console terminal output
+    private val _scriptConsoleOutput = MutableStateFlow<List<TerminalLine>>(emptyList())
+    val scriptConsoleOutput: StateFlow<List<TerminalLine>> = _scriptConsoleOutput.asStateFlow()
+
+    fun clearScriptConsoleOutput() {
+        _scriptConsoleOutput.value = emptyList()
+    }
 
     // Matrix digital rain visualization toggle
     private val _isMatrixActive = MutableStateFlow(false)
@@ -197,6 +395,13 @@ class TerminalViewModel(
     )
 
     init {
+        try {
+            val clipboard = application.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.addPrimaryClipChangedListener(clipboardListener)
+        } catch (e: Exception) {}
+        loadClipboardHistory()
+        loadBackupMetadata()
+
         viewModelScope.launch {
             repository.prepopulateDefaultsIfEmpty()
             loadHistory()
@@ -295,6 +500,71 @@ class TerminalViewModel(
             val ramPenalty = (usedRamPercent * 0.4).toInt()
             val efficiencyScore = (100 - tempPenalty - ramPenalty).coerceIn(10, 100)
 
+            // 7. Network Traffic Stats
+            var rxBytes = 0L
+            var txBytes = 0L
+            var downSpeed = 0.0
+            var upSpeed = 0.0
+            try {
+                rxBytes = TrafficStats.getTotalRxBytes()
+                txBytes = TrafficStats.getTotalTxBytes()
+                val now = SystemClock.elapsedRealtime()
+
+                if (rxBytes != TrafficStats.UNSUPPORTED.toLong() && txBytes != TrafficStats.UNSUPPORTED.toLong()) {
+                    if (lastRxBytes != -1L && lastTxBytes != -1L && lastNetUpdateTime != -1L) {
+                        val timeDiffSec = (now - lastNetUpdateTime) / 1000.0
+                        if (timeDiffSec > 0.1) {
+                            val rxDiff = rxBytes - lastRxBytes
+                            val txDiff = txBytes - lastTxBytes
+                            
+                            downSpeed = if (rxDiff >= 0) (rxDiff / 1024.0) / timeDiffSec else 0.0
+                            upSpeed = if (txDiff >= 0) (txDiff / 1024.0) / timeDiffSec else 0.0
+                        }
+                    }
+                    lastRxBytes = rxBytes
+                    lastTxBytes = txBytes
+                    lastNetUpdateTime = now
+                } else {
+                    val appUid = android.os.Process.myUid()
+                    val uidRx = TrafficStats.getUidRxBytes(appUid)
+                    val uidTx = TrafficStats.getUidTxBytes(appUid)
+                    if (uidRx != TrafficStats.UNSUPPORTED.toLong()) {
+                        if (lastRxBytes != -1L && lastTxBytes != -1L && lastNetUpdateTime != -1L) {
+                            val timeDiffSec = (now - lastNetUpdateTime) / 1000.0
+                            if (timeDiffSec > 0.1) {
+                                val rxDiff = uidRx - lastRxBytes
+                                val txDiff = uidTx - lastTxBytes
+                                downSpeed = if (rxDiff >= 0) (rxDiff / 1024.0) / timeDiffSec else 0.0
+                                upSpeed = if (txDiff >= 0) (txDiff / 1024.0) / timeDiffSec else 0.0
+                            }
+                        }
+                        lastRxBytes = uidRx
+                        lastTxBytes = uidTx
+                        lastNetUpdateTime = now
+                        rxBytes = uidRx
+                        txBytes = uidTx
+                    } else {
+                        // Ambient dynamic flow simulation
+                        downSpeed = (Math.random() * 8.5) + 0.5
+                        upSpeed = (Math.random() * 2.1) + 0.1
+                        rxBytes = 15243100L + (now / 10).toLong()
+                        txBytes = 4210400L + (now / 40).toLong()
+                    }
+                }
+            } catch (e: Exception) {
+                downSpeed = (Math.random() * 12.0) + 1.0
+                upSpeed = (Math.random() * 3.0) + 0.5
+                rxBytes = 104857600L
+                txBytes = 52428800L
+            }
+
+            synchronized(netSpeedHistory) {
+                netSpeedHistory.add(Pair(downSpeed, upSpeed))
+                while (netSpeedHistory.size > 15) {
+                    netSpeedHistory.removeAt(0)
+                }
+            }
+
             _deviceMetrics.value = DeviceMetrics(
                 batteryLevel = batPct,
                 batteryTemp = batteryTemp,
@@ -307,7 +577,12 @@ class TerminalViewModel(
                 appStorageFreeGb = freeGb,
                 appStorageTotalGb = totalGb,
                 systemUptime = uptimeStr,
-                efficiencyScore = efficiencyScore
+                efficiencyScore = efficiencyScore,
+                downloadSpeedKbps = downSpeed,
+                uploadSpeedKbps = upSpeed,
+                totalRxBytes = rxBytes,
+                totalTxBytes = txBytes,
+                networkHistory = ArrayList(netSpeedHistory)
             )
         } catch (e: Exception) {
             // Root catch to prevent background thread crash/freeze
@@ -469,6 +744,8 @@ class TerminalViewModel(
             "echo" -> handleEchoCommand(args)
             "theme" -> handleThemeCommand(args)
             "history" -> handleHistoryCommand()
+            "backup", "config-backup" -> handleBackupCommand()
+            "apt-upgrade-all" -> handleAptUpgradeAllCommand()
 
             // ---- NEW PRE-INSTALLED TOOLS SIMULATION ----
             "neofetch" -> {
@@ -575,6 +852,9 @@ class TerminalViewModel(
                         appendLine("Fetched 494.4 kB in 1s (412 kB/s)", LineType.SUCCESS)
                         appendLine("Reading package lists... Done", LineType.SUCCESS)
                         appendLine("All packages are up to date.", LineType.SUCCESS)
+                    }
+                    "upgrade", "update-all" -> {
+                        handleAptUpgradeAllCommand()
                     }
                     "list", "list-all", "info" -> {
                         appendLine("--- Installed / Available Packages in Virtual Environment ---", LineType.HEADER)
@@ -1383,6 +1663,83 @@ class TerminalViewModel(
         }
     }
 
+    private suspend fun handleBackupCommand() {
+        appendLine("Starting configuration backup...", LineType.HEADER)
+        delay(300)
+        appendLine("Reading saved snippets from database...", LineType.INFO)
+        val snippets = repository.getSnippets()
+        appendLine("Found ${snippets.size} saved snippets.", LineType.SUCCESS)
+        delay(200)
+        
+        appendLine("Reading custom scripts from database...", LineType.INFO)
+        val scripts = repository.getScripts()
+        appendLine("Found ${scripts.size} custom scripts.", LineType.SUCCESS)
+        delay(200)
+
+        appendLine("Serializing configuration data to JSON...", LineType.INFO)
+        val snippetsJson = serializeSnippets(snippets)
+        val scriptsJson = serializeScripts(scripts)
+        delay(300)
+
+        appendLine("Generating local compressed ZIP archive...", LineType.INFO)
+        val zipFile = createBackupZip(getApplication(), snippetsJson, scriptsJson)
+        if (zipFile != null && zipFile.exists()) {
+            appendLine("[SUCCESS] Config backup ZIP archive created!", LineType.SUCCESS)
+            appendLine("Path: ${zipFile.absolutePath}", LineType.OUTPUT)
+            val sizeKb = zipFile.length() / 1024.0
+            appendLine("Size: %.2f KB".format(sizeKb), LineType.OUTPUT)
+            appendLine("Tip: Open the Status Tab to share or save the ZIP file locally!", LineType.WARNING)
+        } else {
+            appendLine("[ERROR] Failed to write backup ZIP archive.", LineType.ERROR)
+        }
+    }
+
+    private suspend fun handleAptUpgradeAllCommand() {
+        appendLine("Executing batch system package update sequentially...", LineType.HEADER)
+        delay(400)
+        
+        // Step 1: apt update simulation
+        appendLine("[1/2] Running 'apt update'...", LineType.INFO)
+        delay(300)
+        appendLine("Get:1 https://termux.org/packages stable InRelease [12.4 kB]", LineType.INFO)
+        delay(250)
+        appendLine("Get:2 https://termux.org/packages stable/main arm64 Packages [482 kB]", LineType.INFO)
+        delay(350)
+        appendLine("Fetched 494.4 kB in 1s (412 kB/s)", LineType.SUCCESS)
+        appendLine("Reading package lists... Done", LineType.SUCCESS)
+        delay(400)
+
+        // Step 2: apt upgrade simulation
+        appendLine("[2/2] Running 'apt upgrade'...", LineType.INFO)
+        delay(400)
+        val upgradable = installedPackages.filter { it in listOf("bash", "clang", "gcc", "python", "nodejs", "golang", "ruby", "php", "perl", "git", "curl", "wget", "neofetch", "coreutils", "nano", "tar", "gzip") }
+        
+        if (upgradable.isEmpty()) {
+            appendLine("All virtual packages are already up-to-date.", LineType.SUCCESS)
+            return
+        }
+
+        appendLine("The following packages will be upgraded sequentially:", LineType.INFO)
+        appendLine("  " + upgradable.joinToString(" "), LineType.INFO)
+        appendLine("Need to get 142.6 MB of package archives.", LineType.OUTPUT)
+        appendLine("After this operation, 11.2 MB of additional disk space will be used.", LineType.OUTPUT)
+        delay(600)
+
+        upgradable.forEachIndexed { index, pkg ->
+            appendLine("[Batch Update] Upgrading $pkg (${index + 1}/${upgradable.size}) ...", LineType.INFO)
+            delay(350)
+            appendLine("Unpacking replacement for $pkg ...", LineType.OUTPUT)
+            delay(150)
+            appendLine("Setting up upgraded $pkg ...", LineType.SUCCESS)
+            delay(100)
+        }
+
+        appendLine("Progress: [========================================] 100%", LineType.SUCCESS)
+        appendLine("Setting up virtual environment structures...", LineType.INFO)
+        delay(400)
+        appendLine("[SUCCESS] All ${upgradable.size} installed packages have been sequentially batch updated!", LineType.SUCCESS)
+    }
+
     // --- To-do Commands ---
 
     private suspend fun handleTodoCommand(args: List<String>) {
@@ -1612,6 +1969,7 @@ class TerminalViewModel(
             return
         }
         scriptJob = viewModelScope.launch {
+            _scriptConsoleOutput.value = emptyList() // clear previous console output on start
             _isScriptExecuting.value = true
             try {
                 appendLine("[SH] Initializing script: ${script.name}.sh", LineType.INFO)
@@ -1693,7 +2051,7 @@ class TerminalViewModel(
 
     private fun handlePomoCommand(args: List<String>) {
         if (args.isEmpty()) {
-            appendLine("Usage: pomo <start [mins] | stop>", LineType.WARNING)
+            appendLine("Usage: pomo <start [mins] [work/break] | pause | resume | reset | stop | task <name> | status>", LineType.WARNING)
             return
         }
         val sub = args[0].lowercase()
@@ -1704,59 +2062,170 @@ class TerminalViewModel(
                     appendLine("Error: Minutes must be between 1 and 180.", LineType.ERROR)
                     return
                 }
-                startPomodoro(mins)
+                val rawType = args.getOrNull(2)?.lowercase() ?: "work"
+                val sessionType = if (rawType == "break" || rawType == "short_break") "Short Break" else "Work"
+                startPomodoro(mins, sessionType)
+            }
+            "pause" -> {
+                pausePomodoro()
+            }
+            "resume" -> {
+                resumePomodoro()
+            }
+            "reset" -> {
+                resetPomodoro()
             }
             "stop" -> {
                 stopPomodoro()
             }
+            "task" -> {
+                if (args.size < 2) {
+                    appendLine("Usage: pomo task <task_name | clear>", LineType.WARNING)
+                    return
+                }
+                val taskName = args.drop(1).joinToString(" ")
+                if (taskName.lowercase() == "clear") {
+                    selectPomoTask(null)
+                } else {
+                    selectPomoTask(taskName)
+                }
+            }
+            "status" -> {
+                val p = _pomoSession.value
+                val statusStr = if (p.isRunning) "RUNNING" else if (p.isPaused) "PAUSED" else "IDLE"
+                val minutes = p.secondsRemaining / 60
+                val seconds = p.secondsRemaining % 60
+                appendLine("=== Pomodoro Session Status ===", LineType.HEADER)
+                appendLine("State: $statusStr", LineType.OUTPUT)
+                appendLine("Session Type: ${p.sessionType}", LineType.OUTPUT)
+                appendLine("Time Remaining: %02d:%02d / %02d:00".format(minutes, seconds, p.totalSeconds / 60), LineType.OUTPUT)
+                appendLine("Active Task: ${p.activeTask ?: "None"}", LineType.OUTPUT)
+                appendLine("Completed Sessions: ${p.completedCount}", LineType.SUCCESS)
+            }
             else -> {
-                appendLine("Unknown pomo action: $sub. Use 'start' or 'stop'.", LineType.ERROR)
+                appendLine("Unknown pomo action: $sub. Use start, pause, resume, reset, stop, task, or status.", LineType.ERROR)
             }
         }
     }
 
-    fun startPomodoro(minutes: Int) {
+    fun startPomodoro(minutes: Int, type: String = "Work", task: String? = null) {
         pomoJob?.cancel()
         val totalSec = minutes * 60
+        val isWorkType = type == "Work"
         _pomoSession.value = PomodoroSession(
             totalSeconds = totalSec,
             secondsRemaining = totalSec,
             isRunning = true,
-            isWork = true,
-            completedCount = _pomoSession.value.completedCount
+            isPaused = false,
+            isWork = isWorkType,
+            completedCount = _pomoSession.value.completedCount,
+            activeTask = task ?: _pomoSession.value.activeTask,
+            sessionType = type
         )
 
-        appendLine("[POMO] Timer started for $minutes minutes! Stay focused.", LineType.SUCCESS)
+        val taskMsg = if (_pomoSession.value.activeTask != null) " focusing on '${_pomoSession.value.activeTask}'" else ""
+        appendLine("[POMO] $type session started for $minutes minutes!$taskMsg", LineType.SUCCESS)
 
-        pomoJob = viewModelScope.launch {
-            var remaining = totalSec
-            while (remaining > 0) {
-                delay(1000)
-                remaining--
-                _pomoSession.value = _pomoSession.value.copy(secondsRemaining = remaining)
+        runPomoTimerLoop()
+    }
 
-                // Log every 5 minutes and last minute countdown
-                if (remaining % 300 == 0 && remaining > 0) {
-                    val minsLeft = remaining / 60
-                    appendLine("[POMO] $minsLeft minutes remaining.", LineType.INFO)
-                } else if (remaining == 60) {
-                    appendLine("[POMO] 1 minute left! Complete your task focus.", LineType.WARNING)
-                }
-            }
-
-            // Completed!
-            appendLine("[POMO] Focus block complete! Take a break. 🍵", LineType.SUCCESS)
-            _pomoSession.value = _pomoSession.value.copy(
-                isRunning = false,
-                completedCount = _pomoSession.value.completedCount + 1
-            )
+    fun pausePomodoro() {
+        if (!_pomoSession.value.isRunning && !_pomoSession.value.isPaused) {
+            appendLine("[POMO] No active timer is running to pause.", LineType.WARNING)
+            return
         }
+        pomoJob?.cancel()
+        _pomoSession.value = _pomoSession.value.copy(
+            isRunning = false,
+            isPaused = true
+        )
+        val minutes = _pomoSession.value.secondsRemaining / 60
+        val seconds = _pomoSession.value.secondsRemaining % 60
+        appendLine("[POMO] Timer paused at %02d:%02d.".format(minutes, seconds), LineType.WARNING)
+    }
+
+    fun resumePomodoro() {
+        if (!_pomoSession.value.isPaused) {
+            appendLine("[POMO] Timer is not paused.", LineType.WARNING)
+            return
+        }
+        pomoJob?.cancel()
+        _pomoSession.value = _pomoSession.value.copy(
+            isRunning = true,
+            isPaused = false
+        )
+        val type = _pomoSession.value.sessionType
+        appendLine("[POMO] Resuming $type session.", LineType.SUCCESS)
+        runPomoTimerLoop()
+    }
+
+    fun resetPomodoro() {
+        pomoJob?.cancel()
+        val defaultSec = if (_pomoSession.value.sessionType == "Work") 1500 else 300
+        _pomoSession.value = _pomoSession.value.copy(
+            secondsRemaining = defaultSec,
+            totalSeconds = defaultSec,
+            isRunning = false,
+            isPaused = false
+        )
+        appendLine("[POMO] Timer reset to ${defaultSec / 60} minutes.", LineType.INFO)
     }
 
     fun stopPomodoro() {
         pomoJob?.cancel()
-        _pomoSession.value = _pomoSession.value.copy(isRunning = false)
+        _pomoSession.value = _pomoSession.value.copy(
+            isRunning = false,
+            isPaused = false
+        )
         appendLine("[POMO] Active timer aborted.", LineType.WARNING)
+    }
+
+    fun selectPomoTask(task: String?) {
+        _pomoSession.value = _pomoSession.value.copy(activeTask = task)
+        if (task != null) {
+            appendLine("[POMO] Target focus task set: '$task'", LineType.INFO)
+        } else {
+            appendLine("[POMO] Target focus task cleared.", LineType.INFO)
+        }
+    }
+
+    private fun runPomoTimerLoop() {
+        pomoJob = viewModelScope.launch {
+            while (_pomoSession.value.secondsRemaining > 0 && _pomoSession.value.isRunning) {
+                delay(1000)
+                val newRemaining = _pomoSession.value.secondsRemaining - 1
+                _pomoSession.value = _pomoSession.value.copy(secondsRemaining = newRemaining)
+
+                val remaining = newRemaining
+                if (remaining % 300 == 0 && remaining > 0) {
+                    val minsLeft = remaining / 60
+                    appendLine("[POMO] $minsLeft minutes remaining in ${_pomoSession.value.sessionType}.", LineType.INFO)
+                } else if (remaining == 60) {
+                    appendLine("[POMO] 1 minute left in ${_pomoSession.value.sessionType}!", LineType.WARNING)
+                }
+            }
+
+            if (_pomoSession.value.secondsRemaining == 0) {
+                val type = _pomoSession.value.sessionType
+                val activeTask = _pomoSession.value.activeTask
+                if (type == "Work") {
+                    appendLine("[POMO] Focus block complete! Take a break. 🍵", LineType.SUCCESS)
+                    if (activeTask != null) {
+                        appendLine("[POMO] Completed focused task: '$activeTask'", LineType.SUCCESS)
+                    }
+                    _pomoSession.value = _pomoSession.value.copy(
+                        isRunning = false,
+                        completedCount = _pomoSession.value.completedCount + 1,
+                        activeTask = null // Clear task upon completion
+                    )
+                } else {
+                    appendLine("[POMO] Break over! Time to get back to work. 💻", LineType.SUCCESS)
+                    _pomoSession.value = _pomoSession.value.copy(
+                        isRunning = false
+                    )
+                }
+            }
+        }
     }
 
     // Helper append terminal logs
@@ -1769,6 +2238,16 @@ class TerminalViewModel(
                 updated.removeAt(0)
             }
             _terminalOutput.value = updated
+
+            // Log to script console in real-time if a script is active
+            if (_isScriptExecuting.value) {
+                val scriptUpdated = _scriptConsoleOutput.value.toMutableList()
+                scriptUpdated.add(TerminalLine(text, type))
+                if (scriptUpdated.size > 300) {
+                    scriptUpdated.removeAt(0)
+                }
+                _scriptConsoleOutput.value = scriptUpdated
+            }
         }
     }
 }
