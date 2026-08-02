@@ -30,6 +30,11 @@ jobs:
         run: |
           if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 
+      - name: Generate debug keystore
+        run: |
+          # Create debug keystore matching app/build.gradle.kts signing config
+          keytool -genkeypair -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -dname "CN=Android Debug, OU=Android, O=Android, L=Unknown, ST=Unknown, C=US" -keyalg RSA -keysize 2048 -validity 10000
+
       - name: Build debug APK
         # Try wrapper first; if missing, fall back to installed gradle
         run: ./gradlew assembleDebug || gradle assembleDebug
